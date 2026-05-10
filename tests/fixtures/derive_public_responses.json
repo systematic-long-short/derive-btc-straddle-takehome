@@ -1,0 +1,70 @@
+{
+  "currencies": {
+    "result": {
+      "currencies": {
+        "BTC": {
+          "currency": "BTC",
+          "spot_price": "80000.0",
+          "market_type": "erc20"
+        }
+      }
+    }
+  },
+  "instruments": {
+    "result": {
+      "instruments": [
+        {
+          "instrument_name": "BTC-20260515-81000-C",
+          "is_active": true,
+          "tick_size": "0.1",
+          "minimum_amount": "0.001",
+          "amount_step": "0.001",
+          "maker_fee_rate": "0.0002",
+          "taker_fee_rate": "0.0008",
+          "base_fee": "0",
+          "base_currency": "BTC",
+          "quote_currency": "USDC",
+          "option_details": {"index": "BTC-USD", "expiry": 1778803200, "strike": "81000", "option_type": "call"}
+        },
+        {
+          "instrument_name": "BTC-20260515-82000-C",
+          "is_active": true,
+          "base_currency": "BTC",
+          "quote_currency": "USDC",
+          "option_details": {"index": "BTC-USD", "expiry": 1778803200, "strike": "82000", "option_type": "call"}
+        },
+        {
+          "instrument_name": "BTC-20260515-79000-P",
+          "is_active": true,
+          "tick_size": "0.1",
+          "minimum_amount": "0.001",
+          "amount_step": "0.001",
+          "maker_fee_rate": "0.0002",
+          "taker_fee_rate": "0.0008",
+          "base_fee": "0",
+          "base_currency": "BTC",
+          "quote_currency": "USDC",
+          "option_details": {"index": "BTC-USD", "expiry": 1778803200, "strike": "79000", "option_type": "put"}
+        },
+        {
+          "instrument_name": "BTC-20260515-78000-P",
+          "is_active": true,
+          "base_currency": "BTC",
+          "quote_currency": "USDC",
+          "option_details": {"index": "BTC-USD", "expiry": 1778803200, "strike": "78000", "option_type": "put"}
+        }
+      ]
+    }
+  },
+  "tickers": {
+    "result": {
+      "tickers": {
+        "BTC-20260515-81000-C": {"t": 1778397000000, "b": "850", "a": "900", "B": "2.5", "A": "3.0", "I": "80000", "M": "875", "option_pricing": {"i": "0.58"}},
+        "BTC-20260515-82000-C": {"t": 1778397000000, "b": "500", "a": "540", "B": "2.5", "A": "3.0", "I": "80000", "M": "520", "option_pricing": {"i": "0.60"}},
+        "BTC-20260515-79000-P": {"t": 1778397000000, "b": "800", "a": "850", "B": "2.0", "A": "2.0", "I": "80000", "M": "825", "option_pricing": {"i": "0.59"}},
+        "BTC-20260515-78000-P": {"t": 1778397000000, "b": "500", "a": "560", "B": "2.0", "A": "2.0", "I": "80000", "M": "530", "option_pricing": {"i": "0.61"}}
+      }
+    }
+  }
+}
+
