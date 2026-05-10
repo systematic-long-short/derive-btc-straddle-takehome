@@ -24,6 +24,7 @@ from derivebench.submission_scan import scan_file
 PACKAGE_RULE = "same-expiry nearest active OTM BTC call above spot and nearest active OTM put below spot, with liquidity/spread filters"
 DEFAULT_SUBMISSION_LOAD_TIMEOUT_SECONDS = 5.0
 DEFAULT_LIFECYCLE_TIMEOUT_SECONDS = 5.0
+CONTAINER_CGROUP_MARKERS = ("docker", "containerd", "kubepods", "podman", "libpod")
 _T = TypeVar("_T")
 
 
@@ -43,7 +44,22 @@ class RunConfig:
     latency_budget_ms: float = 500.0
     mode: str = "replay"
     official: bool = False
+    require_container: bool = False
     lifecycle_timeout_seconds: float = DEFAULT_LIFECYCLE_TIMEOUT_SECONDS
+
+
+def is_running_in_container(
+    *,
+    dockerenv_path: Path = Path("/.dockerenv"),
+    cgroup_path: Path = Path("/proc/1/cgroup"),
+) -> bool:
+    if dockerenv_path.exists():
+        return True
+    try:
+        cgroup = cgroup_path.read_text(errors="ignore").lower()
+    except OSError:
+        return False
+    return any(marker in cgroup for marker in CONTAINER_CGROUP_MARKERS)
 
 
 def _run_with_timeout(call: Callable[[], _T], *, timeout_seconds: float, operation: str) -> _T:
@@ -486,6 +502,8 @@ def run_live(
 
 
 def check_official_environment(config: RunConfig, output_dir: Path) -> None:
+    if config.require_container and not is_running_in_container():
+        raise RuntimeError("--require-container requires running inside a container")
     if not config.official:
         return
     if os.environ.get("DERIVEBENCH_OFFICIAL_EVALUATOR") != "1":

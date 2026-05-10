@@ -10,8 +10,6 @@ from typing import Iterable
 
 THIRD_PARTY_ALLOWED = frozenset({
     "derivebench",
-    "httpx",
-    "websockets",
     "numpy",
     "pandas",
     "polars",
@@ -64,6 +62,7 @@ BLOCKED_MODULES = frozenset({
     "cloudpickle",
     "fcntl",
     "ftplib",
+    "httpx",
     "importlib",
     "inspect",
     "marshal",
@@ -78,6 +77,7 @@ BLOCKED_MODULES = frozenset({
     "ssl",
     "subprocess",
     "sys",
+    "websockets",
 })
 BLOCKED_CALL_NAMES = frozenset({"eval", "exec", "compile", "__import__", "open", "input", "getattr", "setattr", "delattr", "globals", "locals", "vars", "breakpoint"})
 BLOCKED_ATTR_NAMES = frozenset({
@@ -129,9 +129,11 @@ BLOCKED_ATTR_PATHS = frozenset({
     "pandas.read_parquet",
     "numpy.load",
     "numpy.fromfile",
+    "numpy.ctypeslib",
+    "numpy.ctypeslib.load_library",
 })
 BLOCKED_ATTR_PREFIXES = ("pandas.read_", "polars.read_", "polars.scan_")
-PROTECTED_ROOTS = frozenset({"derivebench", "httpx", "websockets", "numpy", "pandas", "polars", "scipy", "statsmodels", "sklearn", "lightgbm", "xgboost", "optuna", "ta"})
+PROTECTED_ROOTS = frozenset({"derivebench", "numpy", "pandas", "polars", "scipy", "statsmodels", "sklearn", "lightgbm", "xgboost", "optuna", "ta"})
 DERIVEBENCH_ALLOWED_IMPORTS = frozenset({"derivebench", "derivebench.model"})
 DERIVEBENCH_ROOT_NAMES = frozenset({"FLAT", "EventResult", "MarketInfo", "Model", "RunResult", "RunSegment", "Side", "Signal", "Tick"})
 
@@ -180,7 +182,18 @@ def _attr_path(node: ast.AST) -> str | None:
 
 
 def _blocked_path(path: str) -> bool:
-    return path in BLOCKED_ATTR_PATHS or any(path.startswith(prefix) for prefix in BLOCKED_ATTR_PREFIXES)
+    if path in BLOCKED_ATTR_PATHS or any(path.startswith(prefix) for prefix in BLOCKED_ATTR_PREFIXES):
+        return True
+    parts = path.split(".")
+    root = parts[0]
+    attr = parts[-1]
+    if root == "pandas" and attr.startswith("read_"):
+        return True
+    if root == "polars" and (attr.startswith("read_") or attr.startswith("scan_")):
+        return True
+    if root == "numpy" and ("ctypeslib" in parts or attr == "load_library"):
+        return True
+    return False
 
 
 class _Visitor(ast.NodeVisitor):
@@ -210,7 +223,10 @@ class _Visitor(ast.NodeVisitor):
                 self._add(node, "critical", "star_import", "star imports are not allowed")
             if mod == "derivebench" and alias.name not in DERIVEBENCH_ROOT_NAMES:
                 self._add(node, "critical", "blocked_import", f"from derivebench import {alias.name!r} is not part of the public candidate API")
-            self.aliases[alias.asname or alias.name] = f"{mod}.{alias.name}" if mod else alias.name
+            full_name = f"{mod}.{alias.name}" if mod else alias.name
+            if _blocked_path(full_name):
+                self._add(node, "critical", "blocked_import", f"import of blocked target {full_name!r}")
+            self.aliases[alias.asname or alias.name] = full_name
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
@@ -247,6 +263,8 @@ class _Visitor(ast.NodeVisitor):
         root = name.split(".", 1)[0]
         if root in BLOCKED_MODULES:
             self._add(node, "critical", "blocked_import", f"import of blocked module {name!r}")
+        elif _blocked_path(name):
+            self._add(node, "critical", "blocked_import", f"import of blocked target {name!r}")
         elif root == "derivebench" and name not in DERIVEBENCH_ALLOWED_IMPORTS:
             self._add(node, "critical", "blocked_import", f"import of {name!r}; submissions may import only derivebench public model API")
         elif root not in ALLOWED_MODULES:
@@ -295,4 +313,3 @@ def iter_critical(report: ScanReport) -> Iterable[Finding]:
 
 def as_json(report: ScanReport) -> str:
     return json.dumps(report.to_dict(), indent=2)
-

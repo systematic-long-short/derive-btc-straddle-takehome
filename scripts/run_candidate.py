@@ -40,6 +40,7 @@ def main(argv: list[str] | None = None) -> int:
         latency_budget_ms=args.latency_budget_ms,
         mode=args.mode,
         official=args.official,
+        require_container=args.require_container,
     )
     check_official_environment(config, args.output)
     candidate = load_submission(args.submission, class_name=args.class_name)

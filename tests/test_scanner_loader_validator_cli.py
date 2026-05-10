@@ -5,8 +5,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from derivebench.runner import load_submission
-from derivebench.submission_scan import scan_file
+from derivebench.submission_scan import scan_file, scan_source
 from derivebench.validation import accounting_audit, validate_run
 
 from tests.conftest import FIXTURES, ROOT
@@ -15,6 +17,120 @@ from tests.conftest import FIXTURES, ROOT
 def test_scanner_accepts_safe_and_rejects_unsafe() -> None:
     assert scan_file(FIXTURES / "safe_submission.py").verdict == "accept"
     report = scan_file(FIXTURES / "unsafe_submission.py")
+    assert report.verdict == "reject"
+    assert any(f.rule == "blocked_import" for f in report.findings)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        """
+from derivebench import Model, Signal, Tick
+from pandas.io.parsers import read_csv
+
+
+class ModelSubmission(Model):
+    def on_tick(self, tick: Tick) -> Signal | None:
+        read_csv("ticks.csv")
+        return None
+""",
+        """
+from derivebench import Model, Signal, Tick
+from polars.io.csv.functions import read_csv
+
+
+class ModelSubmission(Model):
+    def on_tick(self, tick: Tick) -> Signal | None:
+        read_csv("ticks.csv")
+        return None
+""",
+        """
+from derivebench import Model, Signal, Tick
+from polars import scan_parquet
+
+
+class ModelSubmission(Model):
+    def on_tick(self, tick: Tick) -> Signal | None:
+        scan_parquet("ticks.parquet")
+        return None
+""",
+    ],
+)
+def test_scanner_rejects_nested_dataframe_io_import_bypasses(source: str) -> None:
+    report = scan_source(source)
+
+    assert report.verdict == "reject"
+    assert any(f.rule in {"blocked_import", "blocked_call", "blocked_attr"} for f in report.findings)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        """
+import numpy as np
+from derivebench import Model, Signal, Tick
+
+
+class ModelSubmission(Model):
+    def on_tick(self, tick: Tick) -> Signal | None:
+        np.ctypeslib.load_library("native", ".")
+        return None
+""",
+        """
+from derivebench import Model, Signal, Tick
+from numpy.ctypeslib import load_library
+
+
+class ModelSubmission(Model):
+    def on_tick(self, tick: Tick) -> Signal | None:
+        load_library("native", ".")
+        return None
+""",
+        """
+from derivebench import Model, Signal, Tick
+from numpy import ctypeslib
+
+
+class ModelSubmission(Model):
+    def on_tick(self, tick: Tick) -> Signal | None:
+        ctypeslib.load_library("native", ".")
+        return None
+""",
+    ],
+)
+def test_scanner_rejects_numpy_ctypeslib_load_library_bypasses(source: str) -> None:
+    report = scan_source(source)
+
+    assert report.verdict == "reject"
+    assert any(f.rule in {"blocked_import", "blocked_call", "blocked_attr"} for f in report.findings)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        """
+import httpx
+from derivebench import Model, Signal, Tick
+
+
+class ModelSubmission(Model):
+    def on_tick(self, tick: Tick) -> Signal | None:
+        return None
+""",
+        """
+from derivebench import Model, Signal, Tick
+from websockets import connect
+
+
+class ModelSubmission(Model):
+    def on_tick(self, tick: Tick) -> Signal | None:
+        return None
+""",
+    ],
+)
+def test_scanner_rejects_candidate_network_imports(source: str) -> None:
+    report = scan_source(source)
+
     assert report.verdict == "reject"
     assert any(f.rule == "blocked_import" for f in report.findings)
 
