@@ -51,7 +51,22 @@ def main(argv: list[str] | None = None) -> int:
         result = run_replay(candidate=candidate, benchmark=benchmark, data=args.data, config=config, candidate_path=args.submission, benchmark_path=bench_path)
     else:
         result = run_live(candidate=candidate, benchmark=benchmark, config=config, candidate_path=args.submission, benchmark_path=bench_path)
-    print(f"primary_score={result.metrics['primary_score']:.6f} pnl_total={result.pnl_total:.6f} ticks={result.tick_count}")
+    summary = f"primary_score={result.metrics['primary_score']:.6f} pnl_total={result.pnl_total:.6f} ticks={result.tick_count}"
+    args.output.mkdir(parents=True, exist_ok=True)
+    (args.output / "run.log").write_text(
+        "\n".join(
+            [
+                "derivebench run complete",
+                f"mode={args.mode}",
+                f"duration_requested={args.duration}",
+                summary,
+                f"report={args.output / 'report.json'}",
+                f"ticks={args.output / 'ticks.parquet'}",
+                "",
+            ]
+        )
+    )
+    print(summary)
     return 0
 
 

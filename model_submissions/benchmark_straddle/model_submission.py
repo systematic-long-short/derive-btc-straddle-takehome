@@ -34,7 +34,6 @@ class ModelSubmission(Model):
         if realized_vol + realized_move > package_ratio * 1.20 and mark_edge > -0.04 and trend >= -0.15:
             size = min(self.max_long, 0.20 + 8.0 * max(0.0, realized_vol - package_ratio))
             return Signal(Side.LONG_STRADDLE, size=size, confidence=0.65)
-        if package_ratio > max(0.015, realized_vol * 1.80) and mark_edge < 0.08 and abs(trend) < 0.20:
+        if package_ratio > max(0.0045, realized_vol * 1.60) and mark_edge < 0.08 and abs(trend) < 0.20:
             return Signal(Side.SHORT_STRADDLE, size=self.max_short, confidence=0.60)
         return FLAT
-

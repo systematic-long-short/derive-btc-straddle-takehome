@@ -50,6 +50,7 @@ python -m venv .venv
 .venv/bin/python scripts/scan_submission.py model_submissions/benchmark_straddle/model_submission.py
 .venv/bin/python scripts/run_baseline.py --mode replay --data tests/fixtures/derive_replay.json --output runs/replay_baseline --duration 30
 .venv/bin/python scripts/validate_live_run.py --report runs/replay_baseline/report.json --ticks runs/replay_baseline/ticks.parquet --min-duration 1 --min-ticks 1 --allow-replay
+.venv/bin/python scripts/audit_accounting.py --report runs/replay_baseline/report.json --ticks runs/replay_baseline/ticks.parquet
 ```
 
 ## Live Public-Data Run
@@ -64,6 +65,8 @@ It does not use wallets, private endpoints, approvals, or real orders.
 
 ```bash
 .venv/bin/python scripts/run_baseline.py --mode live --duration 3600 --output runs/live_baseline
+.venv/bin/python scripts/validate_live_run.py --report runs/live_baseline/report.json --ticks runs/live_baseline/ticks.parquet --min-duration 3600 --min-ticks 600
+.venv/bin/python scripts/audit_accounting.py --report runs/live_baseline/report.json --ticks runs/live_baseline/ticks.parquet
 ```
 
 ## Scoring
@@ -78,3 +81,4 @@ primary_score = pnl_total * max(sharpe, 0) * (1 - max_drawdown)
 
 Reports also include timeout rate, segment hit rate, trade count, spread paid, slippage/fees, long/short exposure, and feed-health metrics.
 
+The validator rejects stale live feeds, non-Derive replay output unless explicitly allowed, invalid sides, non-OTM package rows, unresolved exposure, timeout rates above the configured limit, report/parquet drift, and accounting mismatches from recomputing PnL and score from `ticks.parquet`.

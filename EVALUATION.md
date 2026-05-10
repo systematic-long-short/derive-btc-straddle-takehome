@@ -36,10 +36,13 @@ Reviewers should require:
 - scanner acceptance,
 - nonzero live Derive ticks,
 - active BTC option legs on each tick,
+- fresh Derive timestamps and sane bid/ask/mid package prices,
+- no invalid model or benchmark signal sides,
 - no synthetic option fills,
 - report/ticks consistency,
 - low timeout rate,
 - final liquidation with no unresolved exposure,
+- independent accounting recomputation from `ticks.parquet`,
 - model score compared to the shipped benchmark on the same tick stream.
 
 Primary score:
@@ -50,3 +53,9 @@ primary_score = pnl_total * max(sharpe, 0) * (1 - max_drawdown)
 
 Do not accept replay scores as official live scores.
 
+Run both checks after the official live run:
+
+```bash
+python scripts/validate_live_run.py --report /tmp/derive_eval/report.json --ticks /tmp/derive_eval/ticks.parquet --min-duration 3600 --min-ticks 600
+python scripts/audit_accounting.py --report /tmp/derive_eval/report.json --ticks /tmp/derive_eval/ticks.parquet
+```
