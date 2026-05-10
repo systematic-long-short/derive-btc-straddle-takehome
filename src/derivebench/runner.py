@@ -9,7 +9,7 @@ import os
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, MutableMapping, Sequence
 
 import pandas as pd
 
@@ -207,11 +207,11 @@ def run_on_ticks(
     return result, rows
 
 
-def feed_health(ticks: Sequence[Tick], *, mode: str) -> dict[str, Any]:
+def feed_health(ticks: Sequence[Tick], *, mode: str, extra: MutableMapping[str, Any] | None = None) -> dict[str, Any]:
     packages = {tick.package_id for tick in ticks}
     sources = {tick.feed_source for tick in ticks}
     duration = ticks[-1].ts - ticks[0].ts if len(ticks) > 1 else 0.0
-    return {
+    health: dict[str, Any] = {
         "mode": mode,
         "tick_count": len(ticks),
         "duration_seconds": duration,
@@ -222,6 +222,9 @@ def feed_health(ticks: Sequence[Tick], *, mode: str) -> dict[str, Any]:
         "min_package_mid": min((tick.package_mid for tick in ticks), default=0.0),
         "max_package_spread_pct": max((tick.package_spread_pct for tick in ticks), default=0.0),
     }
+    if extra:
+        health.update(dict(extra))
+    return health
 
 
 def write_outputs(
@@ -231,6 +234,7 @@ def write_outputs(
     config: RunConfig,
     candidate_path: Path,
     benchmark_path: Path,
+    feed_health_extra: MutableMapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     config.output_dir.mkdir(parents=True, exist_ok=True)
     ticks_path = config.output_dir / "ticks.parquet"
@@ -262,7 +266,7 @@ def write_outputs(
             "submission": str(benchmark_path),
             "metrics": result.benchmark_metrics,
         },
-        "feed_health": feed_health(ticks, mode=config.mode),
+        "feed_health": feed_health(ticks, mode=config.mode, extra=feed_health_extra),
         "validation": {
             "liquidated": (
                 result.metrics.get("final_position_contracts", 1.0) == 0.0
@@ -296,14 +300,77 @@ def run_replay(
     return result
 
 
-def collect_live_ticks(*, duration: float, poll_interval: float = 1.0) -> list[Tick]:
-    feed = DeriveRESTFeed()
+def _record_live_health(health: MutableMapping[str, Any] | None, stats: dict[str, Any]) -> None:
+    if health is not None:
+        health.update(stats)
+
+
+def collect_live_ticks(
+    *,
+    duration: float,
+    poll_interval: float = 1.0,
+    max_consecutive_failures: int = 5,
+    feed: DeriveRESTFeed | None = None,
+    health: MutableMapping[str, Any] | None = None,
+) -> list[Tick]:
+    if max_consecutive_failures < 1:
+        raise ValueError("max_consecutive_failures must be at least 1")
+    feed = feed or DeriveRESTFeed()
     deadline = time.time() + duration
     ticks: list[Tick] = []
+    stats: dict[str, Any] = {
+        "poll_attempts": 0,
+        "poll_success_count": 0,
+        "poll_error_count": 0,
+        "consecutive_poll_failures": 0,
+        "max_consecutive_poll_failures": 0,
+        "poll_error_types": {},
+        "last_poll_error": None,
+        "poll_errors": [],
+    }
     while time.time() < deadline:
-        tick = feed.poll()
+        stats["poll_attempts"] += 1
+        try:
+            tick = feed.poll()
+        except Exception as exc:
+            error_type = type(exc).__name__
+            stats["poll_error_count"] += 1
+            stats["consecutive_poll_failures"] += 1
+            stats["max_consecutive_poll_failures"] = max(
+                stats["max_consecutive_poll_failures"],
+                stats["consecutive_poll_failures"],
+            )
+            stats["poll_error_types"][error_type] = stats["poll_error_types"].get(error_type, 0) + 1
+            stats["last_poll_error"] = f"{error_type}: {exc}"
+            stats["poll_errors"].append(
+                {
+                    "ts": time.time(),
+                    "type": error_type,
+                    "message": str(exc),
+                }
+            )
+            stats["poll_errors"] = stats["poll_errors"][-10:]
+            _record_live_health(health, stats)
+            if stats["consecutive_poll_failures"] >= max_consecutive_failures:
+                raise RuntimeError(
+                    "Derive live polling failed "
+                    f"{stats['consecutive_poll_failures']} consecutive times; "
+                    f"last error: {stats['last_poll_error']}"
+                ) from exc
+            time.sleep(max(0.0, poll_interval))
+            continue
         ticks.append(tick)
+        stats["poll_success_count"] += 1
+        stats["consecutive_poll_failures"] = 0
+        _record_live_health(health, stats)
         time.sleep(max(0.0, poll_interval))
+    _record_live_health(health, stats)
+    if not ticks:
+        raise RuntimeError(
+            "Derive live polling collected no valid ticks "
+            f"over {duration:.3f}s; poll_errors={stats['poll_error_count']} "
+            f"last_error={stats['last_poll_error']}"
+        )
     return ticks
 
 
@@ -315,9 +382,17 @@ def run_live(
     candidate_path: Path,
     benchmark_path: Path,
 ) -> RunResult:
-    ticks = collect_live_ticks(duration=config.duration)
+    live_health: dict[str, Any] = {}
+    ticks = collect_live_ticks(duration=config.duration, health=live_health)
     result, rows = run_on_ticks(model=candidate, benchmark=benchmark, ticks=ticks, config=config)
-    write_outputs(result=result, rows=rows, config=config, candidate_path=candidate_path, benchmark_path=benchmark_path)
+    write_outputs(
+        result=result,
+        rows=rows,
+        config=config,
+        candidate_path=candidate_path,
+        benchmark_path=benchmark_path,
+        feed_health_extra=live_health,
+    )
     return result
 
 

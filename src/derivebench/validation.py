@@ -302,6 +302,32 @@ def validate_run(
         failures.append("report says final exposure was not liquidated")
     if int(feed.get("tick_count") or 0) != len(ticks):
         failures.append("feed_health tick_count does not match parquet rows")
+    live_poll_counts: dict[str, int] = {}
+    for key in (
+        "poll_attempts",
+        "poll_success_count",
+        "poll_error_count",
+        "consecutive_poll_failures",
+        "max_consecutive_poll_failures",
+    ):
+        if key not in feed:
+            continue
+        value = _finite(feed.get(key))
+        if value is None or value < 0 or int(value) != value:
+            failures.append(f"feed_health {key} must be a nonnegative integer")
+            continue
+        live_poll_counts[key] = int(value)
+    if "poll_success_count" in live_poll_counts and live_poll_counts["poll_success_count"] != len(ticks):
+        failures.append("feed_health poll_success_count does not match parquet rows")
+    if {"poll_attempts", "poll_success_count", "poll_error_count"}.issubset(live_poll_counts):
+        expected_attempts = live_poll_counts["poll_success_count"] + live_poll_counts["poll_error_count"]
+        if live_poll_counts["poll_attempts"] != expected_attempts:
+            failures.append("feed_health poll_attempts does not equal successes plus errors")
+    if {"consecutive_poll_failures", "max_consecutive_poll_failures"}.issubset(live_poll_counts):
+        if live_poll_counts["consecutive_poll_failures"] > live_poll_counts["max_consecutive_poll_failures"]:
+            failures.append("feed_health consecutive_poll_failures exceeds max_consecutive_poll_failures")
+    if "poll_errors" in feed and not isinstance(feed.get("poll_errors"), list):
+        failures.append("feed_health poll_errors must be a list when present")
     for participant, metrics in (("model", model_metrics), ("benchmark", benchmark_metrics)):
         if int(metrics.get("n_ticks") or 0) != len(ticks):
             failures.append(f"{participant} metrics n_ticks does not match parquet rows")

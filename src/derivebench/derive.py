@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import random
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -15,6 +16,22 @@ import httpx
 from derivebench.model import Tick
 
 DERIVE_PUBLIC_URL = "https://api.lyra.finance/public"
+TRANSIENT_HTTP_STATUS_CODES = {408, 429, 500, 502, 503, 504}
+TRANSIENT_API_ERROR_CODES = {408, 429, 500, 502, 503, 504, -32000, -32002, -32603}
+TRANSIENT_API_ERROR_MARKERS = (
+    "timeout",
+    "timed out",
+    "temporary",
+    "temporarily",
+    "rate limit",
+    "too many",
+    "server",
+    "internal",
+    "unavailable",
+    "try again",
+    "gateway",
+    "overloaded",
+)
 
 
 def _f(value: Any, default: float = 0.0) -> float:
@@ -25,6 +42,36 @@ def _f(value: Any, default: float = 0.0) -> float:
         return out if math.isfinite(out) else default
     except (TypeError, ValueError):
         return default
+
+
+class DeriveTransientError(RuntimeError):
+    """A Derive public API failure that is worth retrying briefly."""
+
+
+def _is_transient_status(status_code: int) -> bool:
+    return status_code in TRANSIENT_HTTP_STATUS_CODES or status_code >= 500
+
+
+def _api_error_text(error: Any) -> str:
+    if isinstance(error, Mapping):
+        for key in ("message", "reason", "detail", "error"):
+            value = error.get(key)
+            if value:
+                return str(value)
+        return str(dict(error))
+    return str(error)
+
+
+def _is_transient_api_error(error: Any) -> bool:
+    if isinstance(error, Mapping):
+        code = error.get("code") or error.get("status") or error.get("status_code")
+        try:
+            if int(code) in TRANSIENT_API_ERROR_CODES:
+                return True
+        except (TypeError, ValueError):
+            pass
+    text = _api_error_text(error).lower()
+    return any(marker in text for marker in TRANSIENT_API_ERROR_MARKERS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -325,17 +372,68 @@ def load_replay_ticks(path: Path | str, *, duration: float | None = None) -> lis
 
 
 class DeriveRESTClient:
-    def __init__(self, base_url: str = DERIVE_PUBLIC_URL, timeout: float = 10.0) -> None:
+    def __init__(
+        self,
+        base_url: str = DERIVE_PUBLIC_URL,
+        timeout: float = 10.0,
+        *,
+        client: httpx.Client | None = None,
+        transport: httpx.BaseTransport | None = None,
+        max_attempts: int = 4,
+        retry_base_delay: float = 0.25,
+        retry_max_delay: float = 4.0,
+        retry_jitter: float = 0.2,
+    ) -> None:
+        if client is not None and transport is not None:
+            raise ValueError("pass either client or transport, not both")
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be at least 1")
         self.base_url = base_url.rstrip("/")
-        self.client = httpx.Client(timeout=timeout)
+        self.client = client or httpx.Client(timeout=timeout, transport=transport)
+        self.max_attempts = max_attempts
+        self.retry_base_delay = max(0.0, retry_base_delay)
+        self.retry_max_delay = max(0.0, retry_max_delay)
+        self.retry_jitter = max(0.0, retry_jitter)
+
+    def _retry_delay(self, attempt: int) -> float:
+        base = min(self.retry_max_delay, self.retry_base_delay * (2 ** max(0, attempt - 1)))
+        if base <= 0.0 or self.retry_jitter <= 0.0:
+            return base
+        return base + random.uniform(0.0, base * self.retry_jitter)
 
     def post(self, method: str, payload: Mapping[str, Any]) -> dict[str, Any]:
-        response = self.client.post(f"{self.base_url}/{method}", json=dict(payload))
-        response.raise_for_status()
-        data = response.json()
-        if "error" in data and data["error"]:
-            raise RuntimeError(f"Derive {method} error: {data['error']}")
-        return data
+        last_error: Exception | None = None
+        for attempt in range(1, self.max_attempts + 1):
+            try:
+                response = self.client.post(f"{self.base_url}/{method}", json=dict(payload))
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    status_code = exc.response.status_code
+                    if _is_transient_status(status_code):
+                        raise DeriveTransientError(f"Derive {method} HTTP {status_code}") from exc
+                    raise
+                try:
+                    raw = response.json()
+                except ValueError as exc:
+                    raise DeriveTransientError(f"Derive {method} returned invalid JSON") from exc
+                if not isinstance(raw, Mapping):
+                    raise DeriveTransientError(f"Derive {method} returned non-object JSON")
+                data = dict(raw)
+                error = data.get("error")
+                if error:
+                    if _is_transient_api_error(error):
+                        raise DeriveTransientError(f"Derive {method} temporary API error: {_api_error_text(error)}")
+                    raise RuntimeError(f"Derive {method} error: {error}")
+                return data
+            except (DeriveTransientError, httpx.TransportError) as exc:
+                last_error = exc
+                if attempt >= self.max_attempts:
+                    raise RuntimeError(f"Derive {method} failed after {attempt} attempts: {exc}") from exc
+                delay = self._retry_delay(attempt)
+                if delay > 0.0:
+                    time.sleep(delay)
+        raise RuntimeError(f"Derive {method} failed after {self.max_attempts} attempts: {last_error}")
 
     def get_all_instruments(self, *, currency: str = "BTC", instrument_type: str = "option") -> list[Instrument]:
         instruments: list[Instrument] = []
