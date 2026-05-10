@@ -58,6 +58,11 @@ def test_cli_scanner_and_replay_smoke(tmp_path: Path) -> None:
     assert audit["ok"], audit
 
 
+def _write_report(path: Path, report: dict) -> Path:
+    path.write_text(json.dumps(report))
+    return path
+
+
 def test_validator_failure_modes(tmp_path: Path) -> None:
     report = {
         "metadata": {"mode": "replay", "duration_seconds": 0.0},
@@ -196,3 +201,142 @@ def test_validator_enforces_live_source_freshness_and_liquidity(tmp_path: Path) 
     assert any("latest ts age exceeds" in failure for failure in summary["failures"])
     assert any("latest exchange_ts age exceeds" in failure for failure in summary["failures"])
     assert any("liquidity_ok rate below" in failure for failure in summary["failures"])
+
+
+def test_validator_rejects_inconsistent_feed_health_poll_counters(tmp_path: Path) -> None:
+    out = tmp_path / "run"
+    subprocess.run(
+        [
+            sys.executable,
+            "scripts/run_baseline.py",
+            "--mode",
+            "replay",
+            "--data",
+            "tests/fixtures/derive_replay.json",
+            "--output",
+            str(out),
+            "--duration",
+            "30",
+        ],
+        cwd=ROOT,
+        check=True,
+    )
+
+    report_path = out / "report.json"
+    ticks_path = out / "ticks.parquet"
+    base_report = json.loads(report_path.read_text())
+    base_summary = validate_run(
+        report_path=report_path,
+        ticks_path=ticks_path,
+        min_duration=1.0,
+        min_ticks=1,
+        allow_replay=True,
+    )
+    assert base_summary["ok"], base_summary
+    tick_count = base_summary["tick_count"]
+
+    def with_poll_health(**overrides: object) -> dict:
+        report = json.loads(json.dumps(base_report))
+        report["feed_health"].update(
+            {
+                "poll_attempts": tick_count,
+                "poll_success_count": tick_count,
+                "poll_error_count": 0,
+                "consecutive_poll_failures": 0,
+                "max_consecutive_poll_failures": 0,
+                "poll_errors": [],
+            }
+        )
+        report["feed_health"].update(overrides)
+        return report
+
+    cases = [
+        (
+            "attempts_sum_mismatch",
+            with_poll_health(poll_attempts=tick_count + 2, poll_error_count=1),
+            "feed_health poll_attempts does not equal successes plus errors",
+        ),
+        (
+            "success_count_tick_mismatch",
+            with_poll_health(poll_attempts=tick_count + 1, poll_success_count=tick_count + 1),
+            "feed_health poll_success_count does not match parquet rows",
+        ),
+        (
+            "consecutive_failures_exceed_max",
+            with_poll_health(
+                poll_attempts=tick_count + 2,
+                poll_error_count=2,
+                consecutive_poll_failures=2,
+                max_consecutive_poll_failures=1,
+            ),
+            "feed_health consecutive_poll_failures exceeds max_consecutive_poll_failures",
+        ),
+        (
+            "poll_errors_not_list",
+            with_poll_health(poll_errors={"type": "RuntimeError", "message": "boom"}),
+            "feed_health poll_errors must be a list when present",
+        ),
+    ]
+
+    for name, report, expected_failure in cases:
+        summary = validate_run(
+            report_path=_write_report(tmp_path / f"{name}.json", report),
+            ticks_path=ticks_path,
+            min_duration=1.0,
+            min_ticks=1,
+            allow_replay=True,
+        )
+        assert not summary["ok"], name
+        assert any(expected_failure in failure for failure in summary["failures"]), summary
+
+
+def test_validator_allows_populated_feed_health_poll_errors_when_counters_match(tmp_path: Path) -> None:
+    out = tmp_path / "run"
+    subprocess.run(
+        [
+            sys.executable,
+            "scripts/run_baseline.py",
+            "--mode",
+            "replay",
+            "--data",
+            "tests/fixtures/derive_replay.json",
+            "--output",
+            str(out),
+            "--duration",
+            "30",
+        ],
+        cwd=ROOT,
+        check=True,
+    )
+
+    report_path = out / "report.json"
+    ticks_path = out / "ticks.parquet"
+    report = json.loads(report_path.read_text())
+    base_summary = validate_run(
+        report_path=report_path,
+        ticks_path=ticks_path,
+        min_duration=1.0,
+        min_ticks=1,
+        allow_replay=True,
+    )
+    assert base_summary["ok"], base_summary
+    tick_count = base_summary["tick_count"]
+    report["feed_health"].update(
+        {
+            "poll_attempts": tick_count + 1,
+            "poll_success_count": tick_count,
+            "poll_error_count": 1,
+            "consecutive_poll_failures": 0,
+            "max_consecutive_poll_failures": 1,
+            "poll_errors": [{"type": "RuntimeError", "message": "transient spot failure"}],
+        }
+    )
+
+    summary = validate_run(
+        report_path=_write_report(tmp_path / "report_with_poll_errors.json", report),
+        ticks_path=ticks_path,
+        min_duration=1.0,
+        min_ticks=1,
+        allow_replay=True,
+    )
+    assert summary["ok"], summary
