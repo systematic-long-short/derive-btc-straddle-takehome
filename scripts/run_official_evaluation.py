@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 
 DEFAULT_IMAGE = "derivebench-eval:latest"
+DEFAULT_TIMEOUT_GRACE_SECONDS = 300.0
 
 
 def docker_build_cmd(*, image: str, repo_root: Path) -> list[str]:
@@ -47,6 +48,10 @@ def docker_run_cmd(*, image: str, submission: Path, output_dir: Path, duration: 
     ]
 
 
+def evaluation_timeout(*, duration: float, timeout: float | None) -> float:
+    return float(timeout) if timeout is not None else float(duration) + DEFAULT_TIMEOUT_GRACE_SECONDS
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--submission", required=True, type=Path)
@@ -58,6 +63,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--memory", default="4g")
     parser.add_argument("--cpus", default="2")
     parser.add_argument("--pids-limit", type=int, default=256)
+    parser.add_argument("--timeout", type=float, default=None, help="host-side Docker timeout in seconds; defaults to --duration plus 300")
     args = parser.parse_args(argv)
     repo_root = Path(__file__).resolve().parents[1]
     args.output.mkdir(parents=True, exist_ok=True)
@@ -69,11 +75,11 @@ def main(argv: list[str] | None = None) -> int:
         for command in commands:
             print(" ".join(shlex.quote(part) for part in command))
         return 0
+    timeout = evaluation_timeout(duration=args.duration, timeout=args.timeout)
     for command in commands:
-        subprocess.run(command, check=True)
+        subprocess.run(command, check=True, timeout=timeout)
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

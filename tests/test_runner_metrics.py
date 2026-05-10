@@ -31,6 +31,12 @@ class SlowModel(Model):
         return Signal(Side.LONG_STRADDLE, size=0.5)
 
 
+class HangingModel(Model):
+    def on_tick(self, tick: Tick) -> Signal | None:
+        while True:
+            pass
+
+
 def test_next_tick_execution_records_position_after_second_tick(tmp_path: Path) -> None:
     ticks = load_replay_ticks(FIXTURES / "derive_replay.json")
     config = RunConfig(output_dir=tmp_path, latency_budget_ms=500.0)
@@ -52,6 +58,35 @@ def test_timeout_handling_drops_slow_signal(tmp_path: Path) -> None:
     assert result.metrics["timeout_rate"] > 0.0
     assert rows[0]["model_signal"] == "INVALID"
     assert rows[1]["model_position_contracts"] == 0.0
+
+
+def test_infinite_on_tick_is_marked_timed_out_without_hanging(tmp_path: Path) -> None:
+    ticks = load_replay_ticks(FIXTURES / "derive_replay.json")
+    config = RunConfig(output_dir=tmp_path, latency_budget_ms=50.0)
+    result, rows = run_on_ticks(model=HangingModel(), benchmark=FlatModel(), ticks=ticks[:1], config=config)
+    assert rows[0]["model_timed_out"] is True
+    assert rows[0]["model_signal"] == "INVALID"
+    assert result.metrics["timeout_rate"] == pytest.approx(1.0)
+
+
+def test_load_submission_rejects_slow_import_with_timeout(tmp_path: Path) -> None:
+    candidate_path = tmp_path / "model_submission.py"
+    candidate_path.write_text(
+        "\n".join(
+            [
+                "import time",
+                "from derivebench import FLAT, Model, Signal, Tick",
+                "time.sleep(1.0)",
+                "",
+                "class ModelSubmission(Model):",
+                "    def on_tick(self, tick: Tick) -> Signal | None:",
+                "        return FLAT",
+                "",
+            ]
+        )
+    )
+    with pytest.raises(TimeoutError, match="load submission .* timed out"):
+        load_submission(candidate_path, timeout_seconds=0.05)
 
 
 def test_replay_writes_report_and_parquet_schema(tmp_path: Path) -> None:

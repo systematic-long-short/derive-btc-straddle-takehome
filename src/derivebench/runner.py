@@ -6,10 +6,12 @@ import importlib.util
 import json
 import math
 import os
+import signal
+import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, MutableMapping, Sequence
+from typing import Any, Callable, MutableMapping, Sequence, TypeVar
 
 import pandas as pd
 
@@ -20,6 +22,13 @@ from derivebench.sim import AccountConfig, PaperAccount
 from derivebench.submission_scan import scan_file
 
 PACKAGE_RULE = "same-expiry nearest active OTM BTC call above spot and nearest active OTM put below spot, with liquidity/spread filters"
+DEFAULT_SUBMISSION_LOAD_TIMEOUT_SECONDS = 5.0
+DEFAULT_LIFECYCLE_TIMEOUT_SECONDS = 5.0
+_T = TypeVar("_T")
+
+
+class SubmissionTimeoutError(TimeoutError):
+    """Raised when candidate code exceeds a derivebench execution deadline."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,9 +43,61 @@ class RunConfig:
     latency_budget_ms: float = 500.0
     mode: str = "replay"
     official: bool = False
+    lifecycle_timeout_seconds: float = DEFAULT_LIFECYCLE_TIMEOUT_SECONDS
 
 
-def load_submission(path: Path | str, *, class_name: str = "ModelSubmission", config: dict[str, Any] | None = None) -> Model:
+def _run_with_timeout(call: Callable[[], _T], *, timeout_seconds: float, operation: str) -> _T:
+    timeout_seconds = float(timeout_seconds)
+    if timeout_seconds <= 0.0:
+        raise SubmissionTimeoutError(f"{operation} timed out after {timeout_seconds:.3f}s")
+
+    started = time.perf_counter()
+    old_handler: Any = None
+    old_timer: tuple[float, float] | None = None
+    armed = False
+
+    def _raise_timeout(signum: int, frame: Any) -> None:
+        raise SubmissionTimeoutError(f"{operation} timed out after {timeout_seconds:.3f}s")
+
+    can_arm_timer = (
+        threading.current_thread() is threading.main_thread()
+        and hasattr(signal, "SIGALRM")
+        and hasattr(signal, "ITIMER_REAL")
+        and hasattr(signal, "setitimer")
+    )
+    try:
+        if can_arm_timer:
+            try:
+                old_handler = signal.getsignal(signal.SIGALRM)
+                old_timer = signal.getitimer(signal.ITIMER_REAL)
+                signal.signal(signal.SIGALRM, _raise_timeout)
+                signal.setitimer(signal.ITIMER_REAL, timeout_seconds, timeout_seconds)
+                armed = True
+            except (AttributeError, OSError, ValueError):
+                if old_handler is not None:
+                    signal.signal(signal.SIGALRM, old_handler)
+        result = call()
+    finally:
+        if armed:
+            signal.setitimer(signal.ITIMER_REAL, 0.0)
+        elapsed = time.perf_counter() - started
+        if armed:
+            signal.signal(signal.SIGALRM, old_handler)
+            if old_timer is not None and (old_timer[0] > 0.0 or old_timer[1] > 0.0):
+                signal.setitimer(signal.ITIMER_REAL, max(0.0, old_timer[0] - elapsed), old_timer[1])
+
+    if elapsed > timeout_seconds:
+        raise SubmissionTimeoutError(f"{operation} timed out after {timeout_seconds:.3f}s")
+    return result
+
+
+def load_submission(
+    path: Path | str,
+    *,
+    class_name: str = "ModelSubmission",
+    config: dict[str, Any] | None = None,
+    timeout_seconds: float = DEFAULT_SUBMISSION_LOAD_TIMEOUT_SECONDS,
+) -> Model:
     p = Path(path)
     if p.name != "model_submission.py":
         raise ValueError("submission file must be named model_submission.py")
@@ -46,14 +107,18 @@ def load_submission(path: Path | str, *, class_name: str = "ModelSubmission", co
     spec = importlib.util.spec_from_file_location(f"derivebench_candidate_{abs(hash(p))}", p)
     if spec is None or spec.loader is None:
         raise ValueError(f"could not import submission: {p}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    cls = getattr(module, class_name, None)
-    if cls is None:
-        raise ValueError(f"{p} does not define {class_name}")
-    if not isinstance(cls, type) or not issubclass(cls, Model):
-        raise ValueError(f"{class_name} must subclass derivebench.Model")
-    return cls(config=config or {})
+
+    def _load() -> Model:
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        cls = getattr(module, class_name, None)
+        if cls is None:
+            raise ValueError(f"{p} does not define {class_name}")
+        if not isinstance(cls, type) or not issubclass(cls, Model):
+            raise ValueError(f"{class_name} must subclass derivebench.Model")
+        return cls(config=config or {})
+
+    return _run_with_timeout(_load, timeout_seconds=timeout_seconds, operation=f"load submission {p}")
 
 
 def normalize_signal(signal: Signal | None) -> Signal | None:
@@ -75,13 +140,38 @@ def normalize_signal(signal: Signal | None) -> Signal | None:
 def safe_on_tick(model: Model, tick: Tick, *, latency_budget_ms: float) -> tuple[Signal | None, bool]:
     started = time.perf_counter()
     try:
-        signal = normalize_signal(model.on_tick(tick))
+        signal = _run_with_timeout(
+            lambda: normalize_signal(model.on_tick(tick)),
+            timeout_seconds=latency_budget_ms / 1000.0,
+            operation=f"{type(model).__name__}.on_tick",
+        )
+    except SubmissionTimeoutError:
+        return None, True
     except Exception:
         return None, False
     elapsed_ms = (time.perf_counter() - started) * 1000.0
     if elapsed_ms > latency_budget_ms:
         return None, True
     return signal, False
+
+
+def _call_on_start(model: Model, info: MarketInfo, *, timeout_seconds: float) -> None:
+    _run_with_timeout(
+        lambda: model.on_start(info),
+        timeout_seconds=timeout_seconds,
+        operation=f"{type(model).__name__}.on_start",
+    )
+
+
+def _call_on_finish(model: Model, result: RunResult, *, timeout_seconds: float) -> None:
+    try:
+        _run_with_timeout(
+            lambda: model.on_finish(result),
+            timeout_seconds=timeout_seconds,
+            operation=f"{type(model).__name__}.on_finish",
+        )
+    except (SubmissionTimeoutError, Exception):
+        return
 
 
 def _market_info(config: RunConfig) -> MarketInfo:
@@ -121,8 +211,8 @@ def run_on_ticks(
     config.output_dir.mkdir(parents=True, exist_ok=True)
     (config.output_dir / "scratch").mkdir(parents=True, exist_ok=True)
     info = _market_info(config)
-    model.on_start(info)
-    benchmark.on_start(info)
+    _call_on_start(model, info, timeout_seconds=config.lifecycle_timeout_seconds)
+    _call_on_start(benchmark, info, timeout_seconds=config.lifecycle_timeout_seconds)
     model_account = _account(config)
     bench_account = _account(config)
     model_pending: Signal | None = None
@@ -202,8 +292,8 @@ def run_on_ticks(
         benchmark_pnl_total=bench_final - config.starting_capital,
         tick_count=len(ticks),
     )
-    model.on_finish(result)
-    benchmark.on_finish(result)
+    _call_on_finish(model, result, timeout_seconds=config.lifecycle_timeout_seconds)
+    _call_on_finish(benchmark, result, timeout_seconds=config.lifecycle_timeout_seconds)
     return result, rows
 
 
