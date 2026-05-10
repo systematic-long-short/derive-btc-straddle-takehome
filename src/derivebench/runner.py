@@ -316,7 +316,6 @@ def collect_live_ticks(
     if max_consecutive_failures < 1:
         raise ValueError("max_consecutive_failures must be at least 1")
     feed = feed or DeriveRESTFeed()
-    deadline = time.time() + duration
     ticks: list[Tick] = []
     stats: dict[str, Any] = {
         "poll_attempts": 0,
@@ -328,7 +327,7 @@ def collect_live_ticks(
         "last_poll_error": None,
         "poll_errors": [],
     }
-    while time.time() < deadline:
+    while not ticks or ticks[-1].ts - ticks[0].ts < duration:
         stats["poll_attempts"] += 1
         try:
             tick = feed.poll()

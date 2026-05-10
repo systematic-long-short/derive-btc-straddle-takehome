@@ -117,10 +117,10 @@ def test_collect_live_ticks_skips_isolated_poll_failure_without_fabricating_tick
         health=health,
     )
 
-    assert len(ticks) == 2
+    assert len(ticks) == 4
     assert {tick.feed_source for tick in ticks} == {"derive_rest"}
-    assert health["poll_attempts"] == 3
-    assert health["poll_success_count"] == 2
+    assert health["poll_attempts"] == 5
+    assert health["poll_success_count"] == 4
     assert health["poll_error_count"] == 1
     assert health["max_consecutive_poll_failures"] == 1
     assert health["poll_errors"][0]["type"] == "RuntimeError"

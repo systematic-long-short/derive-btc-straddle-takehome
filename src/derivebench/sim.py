@@ -67,7 +67,11 @@ class PaperAccount:
             return 0.0
         notional = size * self.starting_capital
         if signal.side == Side.LONG_STRADDLE:
-            return notional / tick.package_ask if tick.package_ask > 0.0 else 0.0
+            equity = max(self.mark_equity(tick), 0.0)
+            budget = min(notional, equity * self.config.max_position_fraction)
+            slip_multiplier = 1.0 + self.config.slippage_bps / 10_000.0
+            cost_per_contract = tick.package_ask * slip_multiplier * (1.0 + self.config.fee_rate)
+            return budget / cost_per_contract if cost_per_contract > 0.0 else 0.0
         if signal.side == Side.SHORT_STRADDLE:
             equity = max(self.mark_equity(tick), 0.0)
             max_short_notional = equity / max(self.config.short_margin_fraction, 0.1)
@@ -175,4 +179,3 @@ class PaperAccount:
     def _quotes_executable(tick: Tick) -> bool:
         values = [tick.call_bid, tick.call_ask, tick.put_bid, tick.put_ask, tick.package_bid, tick.package_ask]
         return all(math.isfinite(v) and v > 0.0 for v in values) and tick.package_ask >= tick.package_bid
-

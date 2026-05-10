@@ -18,8 +18,9 @@ def test_long_straddle_buys_at_asks_plus_costs_and_liquidates_at_bids() -> None:
     account = PaperAccount(AccountConfig(starting_capital=1000.0, slippage_bps=10.0, fee_rate=0.001))
     fills = account.execute(Signal(Side.LONG_STRADDLE, size=0.5), t0)
     assert fills[0].side == "BUY"
-    assert account.position_contracts == pytest.approx(500.0 / t0.package_ask)
-    assert account.cash < 500.0
+    expected_cost_per_contract = t0.package_ask * 1.001 * 1.001
+    assert account.position_contracts == pytest.approx(500.0 / expected_cost_per_contract)
+    assert account.cash == pytest.approx(500.0)
     before = account.mark_equity(t1)
     account.liquidate(t1)
     assert account.position_contracts == 0.0
@@ -44,4 +45,3 @@ def test_flat_closes_existing_exposure() -> None:
     account.execute(Signal(Side.FLAT), t1)
     assert abs(account.position_contracts) < 1e-12
     assert account.trade_count == 2
-
