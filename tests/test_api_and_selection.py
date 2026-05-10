@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from derivebench import FLAT, MarketInfo, Model, RunResult, RunSegment, Side, Signal, Tick
 from derivebench.derive import parse_btc_spot, parse_instruments, parse_tickers, select_otm_package, tick_from_package
 
@@ -50,8 +52,8 @@ def test_otm_package_selection_uses_nearest_liquid_same_expiry() -> None:
     assert tick.liquidity_ok
 
 
-def test_selection_falls_back_when_spread_filter_excludes_nearest() -> None:
+def test_selection_rejects_when_spread_filter_excludes_all_liquid_packages() -> None:
     data = fixture()
     tickers = parse_tickers(data["tickers"])
-    package = select_otm_package(parse_instruments(data["instruments"]), tickers, 80000.0, max_spread_pct=0.001)
-    assert package.reason == "fallback_nearest_active_same_expiry"
+    with pytest.raises(ValueError, match="no liquid BTC OTM call/put package"):
+        select_otm_package(parse_instruments(data["instruments"]), tickers, 80000.0, max_spread_pct=0.001)

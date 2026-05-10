@@ -263,8 +263,6 @@ def _candidate_pairs(
         liquid_puts = [i for i in puts if _is_liquid(tickers[i.name], min_size=min_size, max_spread_pct=max_spread_pct)]
         if liquid_calls and liquid_puts:
             yield PackageQuote(liquid_calls[0], liquid_puts[0], tickers[liquid_calls[0].name], tickers[liquid_puts[0].name], "nearest_liquid_same_expiry")
-        elif calls and puts:
-            yield PackageQuote(calls[0], puts[0], tickers[calls[0].name], tickers[puts[0].name], "fallback_nearest_active_same_expiry")
 
 
 def select_otm_package(
@@ -282,17 +280,11 @@ def select_otm_package(
         min_size=min_size,
         max_spread_pct=max_spread_pct,
     ):
-        if quote.reason == "nearest_liquid_same_expiry":
-            return quote
-    for quote in _candidate_pairs(
-        instruments,
-        tickers,
-        spot,
-        min_size=min_size,
-        max_spread_pct=max_spread_pct,
-    ):
         return quote
-    raise ValueError("no active BTC OTM call/put package available from Derive public data")
+    raise ValueError(
+        "no liquid BTC OTM call/put package available from Derive public data "
+        f"(min_size={min_size}, max_spread_pct={max_spread_pct})"
+    )
 
 
 def tick_from_package(
@@ -495,7 +487,6 @@ class DeriveRESTFeed:
         spot = self.client.get_btc_spot()
         expiries = sorted({i.expiry_date for i in self._instruments if i.is_active})
         last_error: Exception | None = None
-        fallback: PackageQuote | None = None
         for expiry in expiries[:8]:
             try:
                 tickers = self.client.get_tickers(expiry)
@@ -506,9 +497,6 @@ class DeriveRESTFeed:
                     min_size=self.min_size,
                     max_spread_pct=self.max_spread_pct,
                 )
-                if package.reason != "nearest_liquid_same_expiry":
-                    fallback = fallback or package
-                    continue
                 tick = tick_from_package(
                     package,
                     spot=spot,
@@ -520,14 +508,4 @@ class DeriveRESTFeed:
                 return tick
             except Exception as exc:  # try the next active expiry
                 last_error = exc
-        if fallback is not None:
-            tick = tick_from_package(
-                fallback,
-                spot=spot,
-                btc_recent=self._btc_recent[-120:],
-                package_mid_recent=self._package_recent[-120:],
-            )
-            self._btc_recent.append(tick.btc_spot)
-            self._package_recent.append(tick.package_mid)
-            return tick
-        raise RuntimeError(f"could not build Derive BTC OTM package: {last_error}")
+        raise RuntimeError(f"could not build liquid Derive BTC OTM package: {last_error}")

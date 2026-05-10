@@ -75,9 +75,19 @@ def test_rest_client_retries_timeout_then_success(monkeypatch: pytest.MonkeyPatc
     assert attempts == 2
 
 
-def _feed_transport(*, fail_first_spot: bool = False, always_fail_spot: bool = False) -> httpx.MockTransport:
+def _feed_transport(
+    *,
+    fail_first_spot: bool = False,
+    always_fail_spot: bool = False,
+    thin_tickers: bool = False,
+) -> httpx.MockTransport:
     data = fixture()
     spot_calls = 0
+    tickers = json.loads(json.dumps(data["tickers"]))
+    if thin_tickers:
+        for item in ((tickers.get("result") or {}).get("tickers") or {}).values():
+            item["B"] = "0.0001"
+            item["A"] = "0.0001"
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal spot_calls
@@ -90,10 +100,22 @@ def _feed_transport(*, fail_first_spot: bool = False, always_fail_spot: bool = F
                 return httpx.Response(500, json={"error": "temporary spot failure"}, request=request)
             return httpx.Response(200, json=data["currencies"], request=request)
         if method == "get_tickers":
-            return httpx.Response(200, json=data["tickers"], request=request)
+            return httpx.Response(200, json=tickers, request=request)
         return httpx.Response(404, json={"error": f"unexpected method {method}"}, request=request)
 
     return httpx.MockTransport(handler)
+
+
+def test_rest_feed_raises_instead_of_emitting_non_liquid_tick() -> None:
+    client = DeriveRESTClient(
+        transport=_feed_transport(thin_tickers=True),
+        max_attempts=1,
+        retry_base_delay=0.0,
+    )
+    feed = DeriveRESTFeed(client=client)
+
+    with pytest.raises(RuntimeError, match="could not build liquid Derive BTC OTM package"):
+        feed.poll()
 
 
 def test_collect_live_ticks_skips_isolated_poll_failure_without_fabricating_tick(
