@@ -67,4 +67,11 @@ def test_replay_writes_report_and_parquet_schema(tmp_path: Path) -> None:
     assert result.tick_count == 4
     assert set(["metadata", "model", "benchmark", "feed_health", "validation", "paths"]).issubset(report)
     assert "package_id" in ticks.columns
+    assert report["metadata"]["starting_capital"] == 1000.0
+    assert report["metadata"]["short_margin_fraction"] == 1.5
     assert report["model"]["metrics"]["n_ticks"] == 4
+    for participant in ("model", "benchmark"):
+        metrics = report[participant]["metrics"]
+        assert metrics["final_equity"] == pytest.approx(ticks[f"{participant}_equity"].iloc[-1])
+        assert metrics["final_position_contracts"] == pytest.approx(ticks[f"{participant}_position_contracts"].iloc[-1])
+        assert ticks[f"{participant}_position_contracts"].iloc[-1] == pytest.approx(0.0)

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from derivebench.runner import load_submission
 from derivebench.submission_scan import scan_file
-from derivebench.validation import validate_run
+from derivebench.validation import accounting_audit, validate_run
 
 from tests.conftest import FIXTURES, ROOT
 
@@ -54,6 +54,8 @@ def test_cli_scanner_and_replay_smoke(tmp_path: Path) -> None:
     )
     summary = validate_run(report_path=out / "report.json", ticks_path=out / "ticks.parquet", min_duration=1.0, min_ticks=1, allow_replay=True)
     assert summary["ok"], summary
+    audit = accounting_audit(report_path=out / "report.json", ticks_path=out / "ticks.parquet")
+    assert audit["ok"], audit
 
 
 def test_validator_failure_modes(tmp_path: Path) -> None:
@@ -73,3 +75,124 @@ def test_validator_failure_modes(tmp_path: Path) -> None:
     assert not summary["ok"]
     assert len(summary["failures"]) >= 4
 
+
+def test_validator_rejects_report_parquet_final_accounting_mismatch(tmp_path: Path) -> None:
+    out = tmp_path / "run"
+    subprocess.run(
+        [
+            sys.executable,
+            "scripts/run_baseline.py",
+            "--mode", "replay",
+            "--data", "tests/fixtures/derive_replay.json",
+            "--output", str(out),
+            "--duration", "30",
+        ],
+        cwd=ROOT,
+        check=True,
+    )
+    import pandas as pd
+
+    report_path = out / "report.json"
+    ticks_path = out / "ticks.parquet"
+    report = json.loads(report_path.read_text())
+    report["benchmark"]["metrics"]["timeout_rate"] = 0.50
+    report_path.write_text(json.dumps(report))
+    ticks = pd.read_parquet(ticks_path)
+    last_idx = ticks.index[-1]
+    ticks.loc[last_idx, "model_position_contracts"] = 0.25
+    ticks.loc[last_idx, "benchmark_equity"] = ticks.loc[last_idx, "benchmark_equity"] + 1.0
+    ticks.to_parquet(ticks_path, index=False)
+
+    summary = validate_run(
+        report_path=report_path,
+        ticks_path=ticks_path,
+        min_duration=1.0,
+        min_ticks=1,
+        allow_replay=True,
+    )
+    assert not summary["ok"]
+    assert any("model final_position_contracts mismatch" in failure for failure in summary["failures"])
+    assert any("model has unresolved final accounting state" in failure for failure in summary["failures"])
+    assert any("benchmark final_equity mismatch" in failure for failure in summary["failures"])
+    assert any("benchmark timeout_rate exceeds" in failure for failure in summary["failures"])
+
+
+def test_validator_rejects_invalid_side_and_non_otm_replay(tmp_path: Path) -> None:
+    out = tmp_path / "run"
+    subprocess.run(
+        [
+            sys.executable,
+            "scripts/run_baseline.py",
+            "--mode", "replay",
+            "--data", "tests/fixtures/derive_replay.json",
+            "--output", str(out),
+            "--duration", "30",
+        ],
+        cwd=ROOT,
+        check=True,
+    )
+    import pandas as pd
+
+    ticks_path = out / "ticks.parquet"
+    ticks = pd.read_parquet(ticks_path)
+    ticks.loc[0, "model_signal"] = "CALL_ONLY"
+    ticks.loc[0, "call_strike"] = ticks.loc[0, "btc_spot"] - 1.0
+    ticks.loc[0, "call_name"] = "BTC-CALL-BAD"
+    ticks.loc[0, "package_ask"] = ticks.loc[0, "package_bid"] - 0.01
+    ticks.loc[0, "package_mid"] = 0.0
+    ticks.to_parquet(ticks_path, index=False)
+    summary = validate_run(
+        report_path=out / "report.json",
+        ticks_path=ticks_path,
+        min_duration=1.0,
+        min_ticks=1,
+        allow_replay=True,
+    )
+    assert not summary["ok"]
+    assert any("model_signal contains an invalid side" in failure for failure in summary["failures"])
+    assert any("call strike is not OTM" in failure for failure in summary["failures"])
+    assert any("call_name does not match BTC-YYYYMMDD-strike-C" in failure for failure in summary["failures"])
+    assert any("package ask below bid" in failure for failure in summary["failures"])
+    assert any("package_mid must be positive and finite" in failure for failure in summary["failures"])
+
+
+def test_validator_enforces_live_source_freshness_and_liquidity(tmp_path: Path) -> None:
+    out = tmp_path / "run"
+    subprocess.run(
+        [
+            sys.executable,
+            "scripts/run_baseline.py",
+            "--mode", "replay",
+            "--data", "tests/fixtures/derive_replay.json",
+            "--output", str(out),
+            "--duration", "30",
+        ],
+        cwd=ROOT,
+        check=True,
+    )
+    import pandas as pd
+
+    report_path = out / "report.json"
+    ticks_path = out / "ticks.parquet"
+    report = json.loads(report_path.read_text())
+    report["metadata"]["mode"] = "live"
+    report_path.write_text(json.dumps(report))
+    ticks = pd.read_parquet(ticks_path)
+    ticks.loc[0, "liquidity_ok"] = False
+    ticks.to_parquet(ticks_path, index=False)
+
+    summary = validate_run(
+        report_path=report_path,
+        ticks_path=ticks_path,
+        min_duration=1.0,
+        min_ticks=1,
+        allow_replay=False,
+        max_age_seconds=1.0,
+        min_liquidity_ok_rate=1.0,
+        now=float(ticks["ts"].iloc[-1]) + 5.0,
+    )
+    assert not summary["ok"]
+    assert any("live validation requires derive_rest feed source" in failure for failure in summary["failures"])
+    assert any("latest ts age exceeds" in failure for failure in summary["failures"])
+    assert any("latest exchange_ts age exceeds" in failure for failure in summary["failures"])
+    assert any("liquidity_ok rate below" in failure for failure in summary["failures"])

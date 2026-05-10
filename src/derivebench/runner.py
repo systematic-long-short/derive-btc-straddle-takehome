@@ -165,6 +165,12 @@ def run_on_ticks(
     bench_final = bench_account.observe(last)
     model_account.position_contracts = 0.0
     bench_account.position_contracts = 0.0
+    rows[-1].update(
+        model_equity=model_final,
+        model_position_contracts=model_account.position_contracts,
+        benchmark_equity=bench_final,
+        benchmark_position_contracts=bench_account.position_contracts,
+    )
     ended_ts = last.ts
     model_segment = RunSegment(last.package_id, started_ts, ended_ts, "MIXED", model_final - config.starting_capital, model_account.trade_count, len(ticks), model_account.timeout_count)
     bench_segment = RunSegment(last.package_id, started_ts, ended_ts, "MIXED", bench_final - config.starting_capital, bench_account.trade_count, len(ticks), bench_account.timeout_count)
@@ -240,8 +246,12 @@ def write_outputs(
             "ended_ts": result.ended_ts,
             "duration_seconds": result.ended_ts - result.started_ts,
             "package_rule": PACKAGE_RULE,
+            "starting_capital": config.starting_capital,
+            "max_position_fraction": config.max_position_fraction,
+            "short_margin_fraction": config.short_margin_fraction,
             "slippage_bps": config.slippage_bps,
             "fee_rate": config.fee_rate,
+            "latency_budget_ms": config.latency_budget_ms,
         },
         "model": {
             "submission": str(candidate_path),
@@ -254,7 +264,10 @@ def write_outputs(
         },
         "feed_health": feed_health(ticks, mode=config.mode),
         "validation": {
-            "liquidated": result.metrics.get("final_position_contracts", 1.0) == 0.0,
+            "liquidated": (
+                result.metrics.get("final_position_contracts", 1.0) == 0.0
+                and result.benchmark_metrics.get("final_position_contracts", 1.0) == 0.0
+            ),
             "accepted_sides": [side.value for side in Side],
             "public_data_only": True,
             "synthetic_fills": False,
@@ -315,4 +328,3 @@ def check_official_environment(config: RunConfig, output_dir: Path) -> None:
         raise RuntimeError("DERIVEBENCH_OFFICIAL_EVALUATOR=1 is required for --official")
     if not output_dir.exists():
         raise RuntimeError("official output directory must exist")
-
